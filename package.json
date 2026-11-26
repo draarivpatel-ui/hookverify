@@ -1,7 +1,15 @@
 {
   "name": "@aarivbuildz/hookverify",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Zero-dependency webhook signature verification with constant-time checks, replay protection, and pluggable provider adapters",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/draarivpatel-ui/hookverify.git"
+  },
+  "homepage": "https://github.com/draarivpatel-ui/hookverify#readme",
+  "bugs": {
+    "url": "https://github.com/draarivpatel-ui/hookverify/issues"
+  },
   "keywords": [
     "webhook",
     "signature",
