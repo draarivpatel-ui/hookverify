@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { verify, verifyAsync, isValid, createVerifier, ERROR_CODES } from '../src/index.mjs';
-import { SECRET, SECRET_2, FIXED_NOW, clock, hexHmac, base64Hmac, expectCode, ed25519Fixture } from './helpers.mjs';
+import {
+  verify, verifyAsync, isValid, createVerifier, ERROR_CODES,
+  MemoryReplayStore, defineProvider, registerProvider,
+} from '../src/index.mjs';
+import { SECRET, SECRET_2, FIXED_NOW, clock, hexHmac, base64Hmac, expectCode, expectCodeAsync, ed25519Fixture } from './helpers.mjs';
 
 const opts = (overrides = {}) => ({ secret: SECRET, now: clock(), ...overrides });
 
@@ -91,6 +94,31 @@ test('stripe: stale and future-skew timestamps are both rejected', () => {
   }
   assert.equal(verify('stripe', body, stripeHeaders(body, '1700000000'), opts({ toleranceSeconds: 0 })).valid, true);
   expectCode(() => verify('stripe', body, stripeHeaders(body, '1700000001'), opts({ toleranceSeconds: 0 })), 'TIMESTAMP_OUT_OF_TOLERANCE');
+});
+
+test('stripe: replay key binds to the matched candidate, not the first', () => {
+  const body = 'stripe-candidate';
+  const timestamp = '1700000000';
+  const signature = hexHmac(SECRET, `${timestamp}.${body}`);
+  const store = new MemoryReplayStore();
+  const plain = verify('stripe', body, { 'stripe-signature': `t=${timestamp},v1=${signature}` }, opts({ replayStore: store }));
+  const decoy = '00'.repeat(32);
+  const decoyHeader = `t=${timestamp},v1=${decoy},v1=${signature}`;
+  // The same authenticated delivery with a prepended decoy must produce the
+  // same replay key, or a captured header could be replayed forever by adding
+  // fresh decoys in front of the real signature.
+  const reordered = verify('stripe', body, { 'stripe-signature': decoyHeader }, opts({ replayStore: new MemoryReplayStore() }));
+  assert.equal(reordered.replayKey, plain.replayKey);
+  expectCode(() => verify('stripe', body, { 'stripe-signature': decoyHeader }, opts({ replayStore: store })), 'REPLAYED_DELIVERY');
+});
+
+test('stripe: exactly 32 signature candidates are accepted', () => {
+  const body = 'stripe-boundary';
+  const timestamp = '1700000000';
+  const signature = hexHmac(SECRET, `${timestamp}.${body}`);
+  const decoys = Array.from({ length: 31 }, (_, i) => `v1=${(i + 1).toString(16).padStart(2, '0').repeat(32)}`);
+  const header = `t=${timestamp},v1=${signature},${decoys.join(',')}`;
+  assert.equal(verify('stripe', body, { 'stripe-signature': header }, opts()).valid, true);
 });
 
 test('stripe: malformed signatures and headers are rejected', () => {
@@ -267,6 +295,32 @@ test('discord: publicKey option and hex case variants work', () => {
   assert.equal(result.valid, true);
 });
 
+test('discord: publicKey alone satisfies the secret requirement', () => {
+  const fixture = ed25519Fixture();
+  const body = '{"type":1}';
+  const headers = {
+    'x-signature-ed25519': fixture.signPayload(body),
+    'x-signature-timestamp': '1700000000',
+  };
+  const result = verify('discord', body, headers, { publicKey: fixture.publicKeyHex, now: clock() });
+  assert.equal(result.provider, 'discord');
+  assert.equal(result.valid, true);
+  assert.equal(result.secretIndex, 0);
+});
+
+test('discord: missing public key and missing secret still fail closed', () => {
+  const fixture = ed25519Fixture();
+  const body = 'ping';
+  const headers = { 'x-signature-ed25519': fixture.signPayload(body), 'x-signature-timestamp': '1700000000' };
+  expectCode(() => verify('discord', body, headers, { now: clock() }), 'INVALID_SECRET');
+});
+
+test('shared-secret providers still require a secret when publicKey is present', () => {
+  const body = 'public-key-only';
+  const headers = { 'x-hub-signature-256': `sha256=${hexHmac(SECRET, body)}` };
+  expectCode(() => verify('github', body, headers, { publicKey: 'aa'.repeat(32), now: clock() }), 'INVALID_SECRET');
+});
+
 test('discord: rejects tampered signature, body, key and malformed inputs', () => {
   const fixture = ed25519Fixture();
   const body = 'ping';
@@ -307,6 +361,61 @@ test('createVerifier merges defaults and per-call overrides', () => {
   const other = createVerifier({ secret: 'other', now: clock() });
   assert.equal(other.verify('github', body, { 'x-hub-signature-256': `sha256=${hexHmac(SECRET, body)}`, }, { secret: SECRET }).valid, true);
   assert.equal(typeof verifier.verifyAsync, 'function');
+});
+
+test('provider verify functions that return a promise fail closed', async () => {
+  const provider = defineProvider({
+    name: 'async-provider',
+    verify: async () => ({ secretIndex: 0 }),
+  });
+  registerProvider(provider);
+  expectCode(() => verify('async-provider', 'body', {}, opts()), 'PROVIDER_ERROR');
+  assert.equal(isValid('async-provider', 'body', {}, opts()), false);
+  await expectCodeAsync(() => verifyAsync('async-provider', 'body', {}, opts()), 'PROVIDER_ERROR');
+});
+
+test('a rejected provider promise never becomes an unhandled rejection', async () => {
+  const rejections = [];
+  const listener = (reason) => rejections.push(reason);
+  process.on('unhandledRejection', listener);
+  try {
+    const provider = defineProvider({
+      name: 'rejecting-promise-provider',
+      verify: () => Promise.reject(new Error('provider boom')),
+    });
+    registerProvider(provider);
+    expectCode(() => verify('rejecting-promise-provider', 'body', {}, opts()), 'PROVIDER_ERROR');
+    await expectCodeAsync(() => verifyAsync('rejecting-promise-provider', 'body', {}, opts()), 'PROVIDER_ERROR');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.removeListener('unhandledRejection', listener);
+  }
+});
+
+test('verifyAsync rejects rather than throwing synchronously', async () => {
+  const pending = verifyAsync('missing-provider', 'body', {}, opts());
+  assert.ok(pending instanceof Promise);
+  await expectCodeAsync(() => pending, 'UNKNOWN_PROVIDER');
+});
+
+test('createVerifier rejects non-object defaults and overrides', () => {
+  const body = 'verifier-options';
+  const headers = { 'x-hub-signature-256': `sha256=${hexHmac(SECRET, body)}` };
+  const verifier = createVerifier({ secret: SECRET, now: clock() });
+  assert.equal(verifier.verify('github', body, headers).valid, true);
+  expectCode(() => verifier.verify('github', body, headers, 'nope'), 'INVALID_ARGUMENT');
+  expectCode(() => verifier.isValid('github', body, headers, []), 'INVALID_ARGUMENT');
+  expectCode(() => createVerifier('nope'), 'INVALID_ARGUMENT');
+  expectCode(() => createVerifier([]), 'INVALID_ARGUMENT');
+});
+
+test('non-object options are rejected as invalid arguments', () => {
+  const body = 'options';
+  const headers = { 'x-hub-signature-256': `sha256=${hexHmac(SECRET, body)}` };
+  expectCode(() => verify('github', body, headers, 'nope'), 'INVALID_ARGUMENT');
+  expectCode(() => verify('github', body, headers, []), 'INVALID_ARGUMENT');
+  expectCode(() => verify('github', body, headers, null), 'INVALID_ARGUMENT');
 });
 
 test('single-object call form works for all entry points', async () => {

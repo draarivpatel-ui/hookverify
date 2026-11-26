@@ -2,7 +2,7 @@
 
 Zero-dependency webhook signature verification for Node.js. One small engine, seven verified providers, constant-time comparisons, replay-window enforcement, and an open adapter registry.
 
-**Tests: 258 passing** (verified with `npm test` on Node 26, also compatible with Node 18+).
+**Tests: 275 passing** (verified with `npm test` on Node 26, also compatible with Node 18+).
 
 ## Why
 
@@ -67,6 +67,8 @@ import github from 'hookverify/providers/github';
 ## Replay protection
 
 Timestamp checks are on by default (`toleranceSeconds: 300`). Both stale and future-skew timestamps are rejected. Providers without a timestamp in their scheme are protected by the optional replay store, which keys on a digest of the verified signature and, where available, the delivery id.
+
+When a header carries several valid signatures, as during secret rotation, a digest is recorded for every signature that verified. A captured delivery therefore cannot be replayed by resubmitting the same header with one of its signatures removed.
 
 ```js
 import { verify, MemoryReplayStore } from 'hookverify';

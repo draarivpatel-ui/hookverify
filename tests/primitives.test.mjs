@@ -8,9 +8,10 @@ import {
   registerProvider,
   getProvider,
   listProviders,
+  MemoryReplayStore,
   helpers,
 } from '../src/index.mjs';
-import { expectCode, hexHmac, FIXED_NOW, clock } from './helpers.mjs';
+import { SECRET, expectCode, hexHmac, FIXED_NOW, clock } from './helpers.mjs';
 
 test('error object has a stable code and JSON shape', () => {
   const error = new HookVerifyError('INVALID_HEADER', 'bad header', { header: 'x-test' });
@@ -157,6 +158,95 @@ test('deliveryKey hashes identifiers without exposing them', () => {
   assert.equal(key.length, 7 + 64);
   assert.ok(!key.includes('delivery-123'));
   assert.notEqual(helpers.deliveryKey('github', 'a'), helpers.deliveryKey('github', 'b'));
+});
+
+test('provider results are validated before a replay key is derived', () => {
+  const emptySignature = defineProvider({
+    name: 'empty-signature-provider',
+    verify: () => ({ secretIndex: 0, signature: Buffer.alloc(0) }),
+  });
+  registerProvider(emptySignature);
+  const store = new MemoryReplayStore();
+  verify('empty-signature-provider', 'first', {}, { secret: 'configured', now: clock(), replayStore: store });
+  // An empty signature must not collapse every delivery onto one replay key.
+  assert.equal(verify('empty-signature-provider', 'second', {}, { secret: 'configured', now: clock(), replayStore: store }).valid, true);
+
+  const badSignature = defineProvider({
+    name: 'bad-signature-provider',
+    verify: () => ({ signature: 5 }),
+  });
+  registerProvider(badSignature);
+  expectCode(() => verify('bad-signature-provider', 'x', {}, { secret: 'configured', now: clock() }), 'PROVIDER_ERROR');
+
+  const badIndex = defineProvider({
+    name: 'bad-index-provider',
+    verify: () => ({ secretIndex: 'nope' }),
+  });
+  registerProvider(badIndex);
+  expectCode(() => verify('bad-index-provider', 'x', {}, { secret: 'configured', now: clock() }), 'PROVIDER_ERROR');
+});
+
+test('provider matched signature lists are validated before recording', () => {
+  const badEntry = defineProvider({
+    name: 'bad-matched-provider',
+    verify: () => ({ matchedSignatures: [{ secretIndex: -1, signature: Buffer.alloc(32) }] }),
+  });
+  registerProvider(badEntry);
+  expectCode(() => verify('bad-matched-provider', 'x', {}, { secret: 'configured', now: clock() }), 'PROVIDER_ERROR');
+
+  const tooMany = defineProvider({
+    name: 'too-many-matched-provider',
+    verify: () => ({
+      matchedSignatures: Array.from({ length: 33 }, () => ({ secretIndex: 0, signature: Buffer.alloc(32) })),
+    }),
+  });
+  registerProvider(tooMany);
+  expectCode(() => verify('too-many-matched-provider', 'x', {}, { secret: 'configured', now: clock() }), 'PROVIDER_ERROR');
+});
+
+test('a provider result with a throwing then accessor fails closed', () => {
+  const provider = defineProvider({
+    name: 'throwing-then-provider',
+    verify: () => ({ get then() { throw new Error('boom'); } }),
+  });
+  registerProvider(provider);
+  expectCode(() => verify('throwing-then-provider', 'x', {}, { secret: 'configured', now: clock() }), 'PROVIDER_ERROR');
+});
+
+test('HMAC helpers reject empty, whitespace-only and non-array secrets', () => {
+  const cases = [
+    ['empty-string-secret-provider', () => '', () => ['']],
+    ['blank-string-secret-provider', () => '  ', () => ['  ']],
+    ['empty-buffer-secret-provider', () => Buffer.alloc(0), () => [Buffer.alloc(0)]],
+  ];
+  for (const [name, secretOf, listOf] of cases) {
+    const provider = defineProvider({
+      name,
+      verify(ctx) {
+        const secret = secretOf();
+        const expected = ctx.helpers.hmac(secret, ctx.body);
+        return ctx.helpers.verifyHmacWithSecrets(listOf(), [expected], ctx.body);
+      },
+    });
+    registerProvider(provider);
+    expectCode(() => verify(name, 'b', {}, { secret: 'configured', now: clock() }), 'INVALID_SECRET');
+  }
+
+  const nonArray = defineProvider({
+    name: 'non-array-secret-provider',
+    verify(ctx) {
+      return ctx.helpers.verifyHmacWithSecrets('secret', [ctx.helpers.hmac('secret', ctx.body)], ctx.body);
+    },
+  });
+  registerProvider(nonArray);
+  expectCode(() => verify('non-array-secret-provider', 'b', {}, { secret: 'configured', now: clock() }), 'INVALID_ARGUMENT');
+});
+
+test('whitespace-only configured secrets are rejected', () => {
+  const body = 'whitespace-secret';
+  const headers = { 'x-hub-signature-256': `sha256=${hexHmac('   ', body)}` };
+  expectCode(() => verify('github', body, headers, { secret: '   ', now: clock() }), 'INVALID_SECRET');
+  expectCode(() => verify('github', body, headers, { secrets: [SECRET, '\t\n'], now: clock() }), 'INVALID_SECRET');
 });
 
 test('clock injection is respected and validated', () => {

@@ -210,7 +210,26 @@ function enforceTimestamp(ctx, timestampMs) {
 const MAX_SIGNATURE_CANDIDATES = 32;
 const MAX_SECRETS = 32;
 
+function assertUsableSecret(secret) {
+  if (typeof secret === 'string') {
+    if (secret.length === 0 || secret.trim().length === 0) {
+      fail('INVALID_SECRET', 'Secrets must be non-empty strings');
+    }
+    return;
+  }
+  if (Buffer.isBuffer(secret)) {
+    if (secret.length === 0) {
+      fail('INVALID_SECRET', 'Secret buffers must not be empty');
+    }
+    return;
+  }
+  fail('INVALID_SECRET', 'Secrets must be non-empty strings or buffers');
+}
+
 function verifyHmacWithSecrets(secrets, provided, payload) {
+  if (!Array.isArray(secrets)) {
+    fail('INVALID_ARGUMENT', 'verifyHmacWithSecrets expects an array of secrets');
+  }
   const candidates = Array.isArray(provided) ? provided : [provided];
   if (candidates.length === 0) fail('INVALID_SIGNATURE', 'No signature was supplied');
   if (candidates.length > MAX_SIGNATURE_CANDIDATES) {
@@ -219,21 +238,31 @@ function verifyHmacWithSecrets(secrets, provided, payload) {
   if (secrets.length > MAX_SECRETS) {
     fail('INVALID_SECRET', `Too many secrets (limit ${MAX_SECRETS})`);
   }
+  for (const secret of secrets) assertUsableSecret(secret);
   let matchedIndex = -1;
+  let matchedSignature = null;
+  // Every matching pair is reported. A rotation header can carry one valid
+  // signature per configured secret, and a delivery keyed only on the highest
+  // matching secret could be replayed by resubmitting the same header with
+  // that signature removed. The engine records a replay key for each pair.
+  const matchedSignatures = [];
   for (let i = 0; i < secrets.length; i += 1) {
-    const secret = secrets[i];
-    if (typeof secret !== 'string' && !Buffer.isBuffer(secret)) {
-      fail('INVALID_SECRET', 'Secrets must be non-empty strings');
-    }
-    const expected = hmac(secret, payload);
+    const expected = hmac(secrets[i], payload);
     for (let j = 0; j < candidates.length; j += 1) {
-      if (constantTimeEqual(candidates[j], expected)) matchedIndex = i;
+      if (constantTimeEqual(candidates[j], expected)) {
+        matchedIndex = i;
+        matchedSignature = candidates[j];
+        matchedSignatures.push({ secretIndex: i, signature: candidates[j] });
+      }
     }
   }
   if (matchedIndex === -1) {
     fail('SIGNATURE_MISMATCH', 'Signature does not match any configured secret');
   }
-  return { secretIndex: matchedIndex, signature: candidates[0] };
+  // The primary replay key must bind to a candidate that actually matched.
+  // Binding to candidates[0] lets an attacker prepend a decoy signature to a
+  // captured header and obtain a fresh replay key for the same delivery.
+  return { secretIndex: matchedIndex, signature: matchedSignature, matchedSignatures };
 }
 
 function verifyHmac(ctx, provided, payload = ctx.body) {
@@ -360,7 +389,7 @@ function defineProvider(definition) {
   if (!definition || typeof definition !== 'object' || Array.isArray(definition)) {
     fail('INVALID_ARGUMENT', 'Provider definition must be an object');
   }
-  const { name, verify: verifyFn, description, requiredHeaders } = definition;
+  const { name, verify: verifyFn, description, requiredHeaders, secretOptional } = definition;
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
     fail('INVALID_ARGUMENT', 'Provider name must be lowercase alphanumeric with dashes');
   }
@@ -374,6 +403,7 @@ function defineProvider(definition) {
     name,
     description: typeof description === 'string' ? description : '',
     requiredHeaders: Object.freeze(requiredHeaders ? [...requiredHeaders] : []),
+    secretOptional: secretOptional === true,
     verify: verifyFn,
   });
 }
@@ -448,6 +478,9 @@ const stripe = defineProvider({
         if (timestamp !== null) fail('INVALID_HEADER', 'Stripe-Signature contains more than one t value');
         timestamp = value;
       } else if (key === 'v1') {
+        if (signatures.length >= MAX_SIGNATURE_CANDIDATES) {
+          fail('INVALID_SIGNATURE', `Too many signature candidates (limit ${MAX_SIGNATURE_CANDIDATES})`);
+        }
         signatures.push(decodeHex(value, 'Stripe v1 signature'));
       }
     }
@@ -514,6 +547,9 @@ const standardWebhooks = defineProvider({
     const signatures = [];
     for (const token of header.split(' ')) {
       if (!token.startsWith('v1,')) fail('INVALID_HEADER', 'webhook-signature entries must use v1');
+      if (signatures.length >= MAX_SIGNATURE_CANDIDATES) {
+        fail('INVALID_SIGNATURE', `Too many signature candidates (limit ${MAX_SIGNATURE_CANDIDATES})`);
+      }
       signatures.push(decodeBase64(token.slice(3), 'Standard Webhooks signature'));
     }
     if (signatures.length === 0) fail('INVALID_HEADER', 'webhook-signature is empty');
@@ -534,6 +570,9 @@ const discord = defineProvider({
   name: 'discord',
   description: 'Discord Ed25519 interaction signature verification',
   requiredHeaders: ['x-signature-ed25519', 'x-signature-timestamp'],
+  // The Ed25519 public key may be supplied through publicKey instead of secret,
+  // so a placeholder secret must not be required to reach verify().
+  secretOptional: true,
   verify(ctx) {
     const signatureHeader = getHeader(ctx, 'x-signature-ed25519');
     const timestamp = getHeader(ctx, 'x-signature-timestamp');
@@ -608,27 +647,46 @@ function resolveNow(value) {
   return result;
 }
 
-function normalizeSecrets(options) {
+function normalizeSecrets(options, provider) {
   const configured = options.secrets !== undefined ? options.secrets : options.secret;
+  // Providers such as Discord accept a public key instead of a shared secret.
+  if (configured === undefined && provider.secretOptional === true) return [];
   const list = Array.isArray(configured) ? configured : [configured];
-  if (list.length === 0 || list.some((secret) => typeof secret !== 'string' || secret.length === 0)) {
+  if (list.length === 0 || list.some((secret) => typeof secret !== 'string' || secret.length === 0 || secret.trim().length === 0)) {
     fail('INVALID_SECRET', 'Provide at least one non-empty secret via secret or secrets');
   }
   return list;
 }
 
 function isThenable(value) {
-  return value !== null && (typeof value === 'object' || typeof value === 'function') && typeof value.then === 'function';
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  try {
+    return typeof value.then === 'function';
+  } catch {
+    // An accessor that throws is not a usable result object either. Treat it
+    // as a thenable so the caller fails closed instead of leaking the error.
+    return true;
+  }
+}
+
+// A rejected promise from a provider or from a synchronous replay-store call
+// must not survive as an unhandled rejection after this path has already
+// failed closed; an unhandled rejection terminates Node by default.
+function discardRejection(value) {
+  Promise.resolve(value).catch(() => {});
 }
 
 function buildContext(provider, body, headers, options) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    fail('INVALID_ARGUMENT', 'options must be an object');
+  }
   const normalized = normalizeHeaders(headers);
   return Object.freeze({
     provider: provider.name,
     body: normalizeBody(body),
     headers: normalized.headers,
     headerArrays: normalized.arrayKeys,
-    secrets: normalizeSecrets(options),
+    secrets: normalizeSecrets(options, provider),
     toleranceSeconds: normalizeTolerance(options.toleranceSeconds),
     nowMs: resolveNow(options.now),
     options: Object.freeze({ ...options }),
@@ -636,18 +694,60 @@ function buildContext(provider, body, headers, options) {
   });
 }
 
+function isSignatureValue(value) {
+  return Buffer.isBuffer(value) || value instanceof Uint8Array || typeof value === 'string';
+}
+
+function replayKeyFor(provider, secretIndex, material) {
+  return deliveryKey(provider.name, signatureKey(provider.name, secretIndex, material));
+}
+
 function finish(provider, ctx, result, replayStore, asyncMode) {
+  // A provider that forgets to be synchronous returns a promise here. Treating
+  // it as a result object would report valid: true before any comparison ran.
+  if (isThenable(result)) {
+    discardRejection(result);
+    fail('PROVIDER_ERROR', `${provider.name} verify() returned a promise; provider verify functions must be synchronous`);
+  }
   if (!result || typeof result !== 'object') fail('PROVIDER_ERROR', `${provider.name} verify() must return a result object`);
   if (result.timestampMs !== undefined && result.timestampMs !== null) enforceTimestamp(ctx, result.timestampMs);
+  if (result.secretIndex !== undefined && result.secretIndex !== null &&
+    (!Number.isSafeInteger(result.secretIndex) || result.secretIndex < 0)) {
+    fail('PROVIDER_ERROR', `${provider.name} verify() returned an invalid secretIndex`);
+  }
 
+  const keys = [];
   let replayKey = result.replayKey;
   if (replayKey === undefined || replayKey === null) {
-    replayKey = signatureKey(provider.name, result.secretIndex === undefined ? 0 : result.secretIndex, result.signature || ctx.body);
-    replayKey = deliveryKey(provider.name, replayKey);
+    const signature = result.signature;
+    if (signature !== undefined && signature !== null && !isSignatureValue(signature)) {
+      fail('PROVIDER_ERROR', `${provider.name} verify() returned an unsupported signature value`);
+    }
+    const matched = result.matchedSignatures;
+    if (matched !== undefined && matched !== null) {
+      if (!Array.isArray(matched) || matched.length > MAX_SIGNATURE_CANDIDATES) {
+        fail('PROVIDER_ERROR', `${provider.name} verify() returned an invalid matched signature list`);
+      }
+      for (const entry of matched) {
+        if (!entry || typeof entry !== 'object' ||
+          !Number.isSafeInteger(entry.secretIndex) || entry.secretIndex < 0 ||
+          !isSignatureValue(entry.signature) || entry.signature.length === 0) {
+          fail('PROVIDER_ERROR', `${provider.name} verify() returned an invalid matched signature entry`);
+        }
+        keys.push(replayKeyFor(provider, entry.secretIndex, entry.signature));
+      }
+    }
+    // An empty signature would collapse every delivery to one replay key.
+    const material = signature !== undefined && signature !== null && signature.length > 0 ? signature : ctx.body;
+    const secretIndex = result.secretIndex === undefined || result.secretIndex === null ? 0 : result.secretIndex;
+    replayKey = replayKeyFor(provider, secretIndex, material);
   }
   if (typeof replayKey !== 'string' || replayKey.length === 0) {
     fail('INVALID_ARGUMENT', 'Replay key must be a non-empty string');
   }
+  // The primary key is recorded first, then every other signature that matched
+  // so a rotation delivery cannot be replayed by dropping one of them.
+  keys.unshift(replayKey);
 
   const output = Object.freeze({
     provider: provider.canonicalName || provider.name,
@@ -657,31 +757,50 @@ function finish(provider, ctx, result, replayStore, asyncMode) {
     replayKey,
   });
 
-  const applyStore = (seen) => {
-    if (seen === false) fail('REPLAYED_DELIVERY', 'This delivery has already been verified', { replayKey });
-    if (seen !== true && seen !== undefined) {
+  const applyStore = (seen, key) => {
+    if (seen === false) fail('REPLAYED_DELIVERY', 'This delivery has already been verified', { replayKey: key });
+    if (seen !== true) {
       fail('INVALID_ARGUMENT', 'Replay store checkAndRecord must return true for a new delivery or false for a replay');
     }
   };
 
-  if (ctx.options.replayStore !== undefined) {
-    if (!replayStore || typeof replayStore.checkAndRecord !== 'function') {
-      fail('INVALID_ARGUMENT', 'replayStore must implement checkAndRecord(key, nowMs)');
-    }
-    const seen = replayStore.checkAndRecord(replayKey, ctx.nowMs);
-    if (isThenable(seen)) {
-      if (!asyncMode) {
-        fail('INVALID_ARGUMENT', 'This replay store is asynchronous; use verifyAsync instead');
-      }
-      return Promise.resolve(seen).then((value) => {
-        applyStore(value);
-        return output;
-      });
-    }
-    applyStore(seen);
+  const complete = () => (asyncMode ? Promise.resolve(output) : output);
+
+  if (ctx.options.replayStore === undefined) return complete();
+
+  if (!replayStore || typeof replayStore.checkAndRecord !== 'function') {
+    fail('INVALID_ARGUMENT', 'replayStore must implement checkAndRecord(key, nowMs)');
+  }
+  const check = replayStore.checkAndRecord;
+  // Refuse an async store before calling it: the synchronous entry point
+  // cannot honor a promise, and the call itself may already have persisted
+  // the delivery key, which would burn a legitimate delivery id.
+  if (!asyncMode && check.constructor && check.constructor.name === 'AsyncFunction') {
+    fail('INVALID_ARGUMENT', 'This replay store is asynchronous; use verifyAsync instead');
   }
 
-  return asyncMode ? Promise.resolve(output) : output;
+  const uniqueKeys = [...new Set(keys)];
+  let index = 0;
+  const recordNext = () => {
+    while (index < uniqueKeys.length) {
+      const key = uniqueKeys[index];
+      index += 1;
+      const seen = check.call(replayStore, key, ctx.nowMs);
+      if (isThenable(seen)) {
+        if (!asyncMode) {
+          discardRejection(seen);
+          fail('INVALID_ARGUMENT', 'This replay store is asynchronous; use verifyAsync instead');
+        }
+        return Promise.resolve(seen).then((value) => {
+          applyStore(value, key);
+          return recordNext();
+        });
+      }
+      applyStore(seen, key);
+    }
+    return complete();
+  };
+  return recordNext();
 }
 
 function unpack(args) {
@@ -693,7 +812,7 @@ function unpack(args) {
     delete options.headers;
     return [single.provider, single.body, single.headers, options];
   }
-  return [args[0], args[1], args[2], args[3] || {}];
+  return [args[0], args[1], args[2], args.length > 3 && args[3] !== undefined ? args[3] : {}];
 }
 
 function runVerify(providerInput, body, headers, options) {
@@ -706,14 +825,17 @@ function runVerify(providerInput, body, headers, options) {
     if (error instanceof HookVerifyError) throw error;
     fail('PROVIDER_ERROR', `${provider.name} verification failed`, { message: String(error && error.message ? error.message : error) });
   }
-  return finish(provider, ctx, result, options.replayStore, false);
+  return finish(provider, ctx, result, ctx.options.replayStore, false);
 }
 
 function verify(...args) {
   return runVerify(...unpack(args));
 }
 
-function verifyAsync(...args) {
+// Declared async so argument, provider, and replay-store failures surface as a
+// rejected promise rather than a synchronous throw that callers cannot catch
+// with .catch().
+async function verifyAsync(...args) {
   const [providerInput, body, headers, options] = unpack(args);
   const provider = resolveProvider(providerInput);
   const ctx = buildContext(provider, body, headers, options);
@@ -724,7 +846,7 @@ function verifyAsync(...args) {
     if (error instanceof HookVerifyError) throw error;
     fail('PROVIDER_ERROR', `${provider.name} verification failed`, { message: String(error && error.message ? error.message : error) });
   }
-  return finish(provider, ctx, result, options.replayStore, true);
+  return finish(provider, ctx, result, ctx.options.replayStore, true);
 }
 
 function isValid(...args) {
@@ -738,8 +860,16 @@ function isValid(...args) {
 }
 
 function createVerifier(defaults = {}) {
-  if (!defaults || typeof defaults !== 'object') fail('INVALID_ARGUMENT', 'createVerifier expects an options object');
-  const merge = (overrides) => ({ ...defaults, ...(overrides || {}) });
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) {
+    fail('INVALID_ARGUMENT', 'createVerifier expects an options object');
+  }
+  const merge = (overrides) => {
+    if (overrides === undefined || overrides === null) return { ...defaults };
+    if (typeof overrides !== 'object' || Array.isArray(overrides)) {
+      fail('INVALID_ARGUMENT', 'createVerifier overrides must be an options object');
+    }
+    return { ...defaults, ...overrides };
+  };
   return Object.freeze({
     verify(provider, body, headers, overrides) {
       return verify(provider, body, headers, merge(overrides));

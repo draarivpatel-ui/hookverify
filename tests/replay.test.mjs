@@ -150,6 +150,41 @@ test('replay store must return a boolean', () => {
   expectCode(() => verify('github', body, githubHeaders(body), opts({ replayStore: {} })), 'INVALID_ARGUMENT');
 });
 
+test('rotation signatures cannot be replayed by dropping one valid candidate', () => {
+  const current = 'rotation-current';
+  const previous = 'rotation-previous';
+  const body = 'subset-body';
+  const timestamp = '1700000000';
+  const signature = (secret) => hexHmac(secret, `${timestamp}.${body}`);
+  const store = new MemoryReplayStore();
+  const options = { secrets: [current, previous], now: clock(), replayStore: store };
+  const header = (values) => ({ 'stripe-signature': `t=${timestamp},${values.map((value) => `v1=${value}`).join(',')}` });
+  assert.equal(verify('stripe', body, header([signature(current), signature(previous)]), options).valid, true);
+  // A captured header carrying one signature per rotation secret must stay
+  // single-use: removing the signature the primary key bound to must still
+  // hit a recorded replay key.
+  expectCode(() => verify('stripe', body, header([signature(current)]), options), 'REPLAYED_DELIVERY');
+  expectCode(() => verify('stripe', body, header([signature(previous)]), options), 'REPLAYED_DELIVERY');
+  // Other deliveries are not over-blocked by the extra recorded keys.
+  const otherBody = 'subset-other';
+  assert.equal(verify('stripe', otherBody, header([hexHmac(current, `${timestamp}.${otherBody}`)]), options).valid, true);
+});
+
+test('a rejected replay-store promise in the synchronous path is not an unhandled rejection', async () => {
+  const rejections = [];
+  const listener = (reason) => rejections.push(reason);
+  process.on('unhandledRejection', listener);
+  try {
+    const store = { checkAndRecord: () => Promise.reject(new Error('store boom')) };
+    const body = 'store-reject';
+    expectCode(() => verify('github', body, githubHeaders(body), opts({ replayStore: store })), 'INVALID_ARGUMENT');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(rejections, []);
+  } finally {
+    process.removeListener('unhandledRejection', listener);
+  }
+});
+
 test('failed signature verification never records a replay key', () => {
   const store = new MemoryReplayStore();
   const body = 'unverified';

@@ -56,6 +56,8 @@ export interface ProviderContext {
   readonly provider: string;
   readonly body: Buffer;
   readonly headers: ReadonlyMap<string, ReadonlyArray<string | null>>;
+  /** Header names that were supplied as arrays and must be rejected when read. */
+  readonly headerArrays: ReadonlySet<string>;
   readonly secrets: readonly string[];
   readonly toleranceSeconds: number;
   readonly nowMs: Milliseconds;
@@ -81,9 +83,17 @@ export interface ProviderContext {
 /** Internal result contract for provider authors. */
 export interface VerificationResultInternal {
   timestampMs?: Milliseconds | null;
-  secretIndex?: number;
-  signature?: Buffer;
-  replayKey?: string;
+  secretIndex?: number | null;
+  signature?: Buffer | Uint8Array | string;
+  replayKey?: string | null;
+  /**
+   * Every signature that verified, one per matching secret. The engine records
+   * a replay key for each entry. `verifyHmacWithSecrets` fills this in.
+   */
+  matchedSignatures?: ReadonlyArray<{
+    secretIndex: number;
+    signature: Buffer | Uint8Array | string;
+  }>;
 }
 
 /** Public, frozen result returned by successful verification. */
@@ -114,6 +124,13 @@ export interface ProviderDefinition {
   readonly name: string;
   readonly description?: string;
   readonly requiredHeaders?: readonly string[];
+  /**
+   * Set to true only for adapters that authenticate without a shared secret,
+   * for example Discord when the Ed25519 public key is supplied through
+   * `publicKey`. Other adapters still require `secret` or `secrets`.
+   */
+  readonly secretOptional?: boolean;
+  /** Must be synchronous. Returning a promise is reported as PROVIDER_ERROR. */
   verify(ctx: ProviderContext): VerificationResultInternal;
 }
 
@@ -137,7 +154,7 @@ export declare class MemoryReplayStore implements ReplayStore {
 
 export declare function defineProvider(definition: ProviderDefinition): Provider;
 export declare function registerProvider(provider: Provider): Provider;
-export declare function getProvider(name: string): Provider;
+export declare function getProvider(name: string | Provider): Provider;
 export declare function listProviders(): ReadonlyArray<string>;
 
 export declare function verify(
@@ -201,6 +218,7 @@ export declare const providers: Readonly<{
   linear: Provider;
   svix: Provider;
   standardWebhooks: Provider;
+  'standard-webhooks': Provider;
   discord: Provider;
 }>;
 
@@ -219,7 +237,7 @@ export declare const helpers: Readonly<{
   constantTimeEqual(a: Buffer, b: Buffer): boolean;
   deliveryKey(provider: string, identifier: string): string;
   normalizeBody(body: unknown): Buffer;
-  normalizeHeaders(headers: unknown): Map<string, string[]>;
+  normalizeHeaders(headers: unknown): Map<string, Array<string | null>>;
   parseTimestampSeconds(value: string): Milliseconds;
 }>;
 
