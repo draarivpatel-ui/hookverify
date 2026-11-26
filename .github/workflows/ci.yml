@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Verify zero runtime dependencies
+        run: node -e "const p = require('./package.json'); if (Object.keys(p.dependencies).length || Object.keys(p.devDependencies).length) process.exit(1)"
+      - name: Run deterministic test suite
+        run: npm test

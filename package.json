@@ -1,0 +1,57 @@
+{
+  "name": "hookverify",
+  "version": "1.0.0",
+  "description": "Zero-dependency webhook signature verification with constant-time checks, replay protection, and pluggable provider adapters",
+  "keywords": [
+    "webhook",
+    "signature",
+    "verification",
+    "hmac",
+    "ed25519",
+    "replay-protection",
+    "security",
+    "github",
+    "stripe",
+    "slack",
+    "shopify",
+    "linear",
+    "svix",
+    "discord"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./cjs/index.cjs",
+  "module": "./src/index.mjs",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/index.mjs",
+      "require": "./cjs/index.cjs"
+    },
+    "./providers/*": {
+      "types": "./types/index.d.ts",
+      "import": "./src/providers/*.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cjs",
+    "types",
+    "README.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "GOOD_FIRST_ISSUES.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:all": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
