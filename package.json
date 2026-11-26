@@ -1,5 +1,5 @@
 {
-  "name": "hookverify",
+  "name": "@aarivbuildz/hookverify",
   "version": "1.0.0",
   "description": "Zero-dependency webhook signature verification with constant-time checks, replay protection, and pluggable provider adapters",
   "keywords": [

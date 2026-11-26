@@ -19,7 +19,7 @@ Most webhook verification snippets get at least one of these wrong:
 ## Install
 
 ```sh
-npm install hookverify
+npm install @aarivbuildz/hookverify
 ```
 
 No build step, no native addons, no transitive packages.
@@ -27,7 +27,7 @@ No build step, no native addons, no transitive packages.
 ## Quick start
 
 ```js
-import { verify } from 'hookverify';
+import { verify } from '@aarivbuildz/hookverify';
 
 // `request.rawBody` must be the exact bytes received, not parsed JSON.
 const result = verify('github', request.rawBody, request.headers, {
@@ -41,7 +41,7 @@ const result = verify('github', request.rawBody, request.headers, {
 CommonJS works identically:
 
 ```js
-const { verify } = require('hookverify');
+const { verify } = require('@aarivbuildz/hookverify');
 ```
 
 Strict TypeScript definitions ship with the package. No `@types/*` install needed.
@@ -71,7 +71,7 @@ Timestamp checks are on by default (`toleranceSeconds: 300`). Both stale and fut
 When a header carries several valid signatures, as during secret rotation, a digest is recorded for every signature that verified. A captured delivery therefore cannot be replayed by resubmitting the same header with one of its signatures removed.
 
 ```js
-import { verify, MemoryReplayStore } from 'hookverify';
+import { verify, MemoryReplayStore } from '@aarivbuildz/hookverify';
 
 const replayStore = new MemoryReplayStore({ maxEntries: 10_000, ttlSeconds: 600 });
 
@@ -106,7 +106,7 @@ console.log(result.secretIndex); // 0 or 1
 ## Custom providers
 
 ```js
-import { defineProvider, registerProvider, verify } from 'hookverify';
+import { defineProvider, registerProvider, verify } from '@aarivbuildz/hookverify';
 import { createHmac } from 'node:crypto';
 
 const acme = defineProvider({
@@ -134,7 +134,7 @@ Helpers enforce strict canonical hex and base64 decoding, so custom adapters inh
 Every rejection is a `HookVerifyError` with a stable `error.code`:
 
 ```js
-import { verify, HookVerifyError } from 'hookverify';
+import { verify, HookVerifyError } from '@aarivbuildz/hookverify';
 
 try {
   verify('stripe', rawBody, headers, { secret });
