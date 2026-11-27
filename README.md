@@ -1,5 +1,7 @@
 # hookverify
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/draarivpatel-ui/hookverify/badge)](https://scorecard.dev/viewer/?uri=github.com/draarivpatel-ui/hookverify)
+
 Zero-dependency webhook signature verification for Node.js. One small engine, seven verified providers, constant-time comparisons, replay-window enforcement, and an open adapter registry.
 
 **Tests: 275 passing** (verified with `npm test` on Node 26, also compatible with Node 18+).
