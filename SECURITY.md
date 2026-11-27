@@ -2,11 +2,16 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest published major version. There is only one supported line today: 1.x.
+| Version | Supported |
+| --- | --- |
+| Latest published 1.x release | Yes |
+| Older releases | No |
+
+Security fixes are applied to the latest published 1.x release. Users should upgrade to the fixed release as soon as it is available.
 
 ## Reporting a vulnerability
 
-Please report security issues privately through the repository's private vulnerability reporting feature. Do not open a public issue for an unpatched vulnerability.
+Report suspected vulnerabilities privately through [GitHub private vulnerability reporting](https://github.com/draarivpatel-ui/hookverify/security/advisories/new). Do not open a public issue for an unpatched vulnerability.
 
 Include:
 
@@ -15,7 +20,24 @@ Include:
 3. The impact you observed (signature bypass, timing leak, resource exhaustion, and so on).
 4. A suggested fix if you have one.
 
-You should receive an acknowledgement within seven days. Patches and a release follow once the issue is confirmed. Credit is given in the release notes unless you prefer otherwise.
+Do not include real webhook secrets, credentials or customer data in a report.
+
+## Acknowledgment and coordinated disclosure timeline
+
+- We aim to acknowledge a vulnerability report within 3 business days.
+- We aim to complete initial triage and severity assessment within 14 days.
+- We aim to release a fix within 90 days of confirming a vulnerability, sooner for high severity issues when practical.
+- We coordinate public disclosure with the reporter. A public advisory is normally published after a fixed release is available or on a mutually agreed date.
+- Credit is given in release notes and the advisory unless the reporter prefers otherwise.
+- If a report is not accepted as a vulnerability, we will explain the reasoning before closing the advisory.
+
+## Vulnerability handling process
+
+1. Receive the private report through the GitHub security advisory.
+2. Reproduce the issue, determine affected versions and assess severity.
+3. Develop a fix with regression tests in `tests/`.
+4. Publish the fixed release and prepare the advisory.
+5. Publish coordinated disclosure notes with affected and fixed versions.
 
 ## Scope
 
@@ -32,13 +54,6 @@ The following are not security issues in this library:
 - Vulnerabilities in an application's secret storage or TLS configuration.
 - Missing replay protection when the application does not pass a `replayStore` or a timestamp-bearing provider.
 - Rate limiting, authentication, or authorization decisions made after verification.
-
-## Disclosure process
-
-1. Report received and triaged.
-2. Reproduction confirmed and severity assigned.
-3. Fix developed with a regression test in `tests/`.
-4. Patch released; advisory published afterwards.
 
 ## Security design notes
 
