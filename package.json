@@ -55,11 +55,14 @@
   ],
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "test:all": "node --test tests/*.test.mjs"
+    "test:all": "node --test tests/*.test.mjs",
+    "test:fuzz": "node --test test/fuzz.test.js"
   },
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {
+    "fast-check": "4.10.3"
+  }
 }

@@ -22,7 +22,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
+
+      - name: Install development dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Verify zero runtime dependencies
-        run: node -e "const p = require('./package.json'); if (Object.keys(p.dependencies).length || Object.keys(p.devDependencies).length) process.exit(1)"
+        run: node -e "const p = require('./package.json'); if (Object.keys(p.dependencies || {}).length) process.exit(1)"
       - name: Run deterministic test suite
         run: npm test
+      - name: Run fast-check property fuzz tests
+        run: npm run test:fuzz
